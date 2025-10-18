@@ -49,10 +49,14 @@ env:
 
 jobs:
   research:
-    name: Research (CCSDK WebSearch/WebFetch)
+    name: Research (Claude Agent SDK)
     runs-on: ubuntu-latest
     env:
+      # Agent SDK は CLAUDE_API_KEY を既定で参照するので両対応で設定
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_AGENT_LOG_LEVEL: debug
+      PLAYWRIGHT_BROWSERS_PATH: 0
       THEME: ${{ github.event.inputs.theme }}
       TARGET: ${{ github.event.inputs.target }}
     outputs:
@@ -73,6 +77,12 @@ jobs:
           npm uninstall @anthropic-ai/claude-code || true
           npm i @anthropic-ai/claude-agent-sdk
 
+      # WebFetch を後で使う場合に備えてブラウザも導入（WebSearchのみでも害はありません）
+      - name: Install browser for Web tools
+        run: |
+          npm i playwright
+          npx playwright install --with-deps chromium | cat
+
       - name: Research with Claude Agent SDK
         run: |
           cat > research.mjs <<'EOF'
@@ -92,14 +102,21 @@ jobs:
           ].join('\n');
           const userPrompt = `以下のテーマとターゲットに対する最終版のリサーチレポートを作成してください。\n【重要】途中経過や確認質問は一切せず、最終レポートのみを返してください。不明点がある場合は「前提と仮定」セクションで簡潔に仮定を明記してから続行してください。事実ベースで一次情報を最優先し、本文にMarkdownリンクで出典を埋め込んでください。\n---\nテーマ: ${theme}\nターゲット: ${target}\n現在日付: ${today}`;
           const messages = [];
-          for await (const msg of query({
-            prompt: userPrompt,
-            options: {
-              customSystemPrompt: sys,
-              allowedTools: ['WebSearch','WebFetch'],
-              permissionMode: 'acceptEdits',
-            },
-          })) { messages.push(msg); }
+          try {
+            for await (const msg of query({
+              prompt: userPrompt,
+              options: {
+                customSystemPrompt: sys,
+                // まずは WebSearch のみで緑化。必要になったら 'WebFetch' を追加
+                allowedTools: ['WebSearch'],
+                permissionMode: 'acceptEdits',
+              },
+            })) { messages.push(msg); }
+          } catch (e) {
+            fs.mkdirSync('.note-artifacts', { recursive: true });
+            fs.writeFileSync(`${artifactsDir}/research_error.log`, String(e?.stack || e));
+            throw e;
+          }
           const assistantTexts = messages.filter(m=>m.type==='assistant').map(m=>{
             const c=m.message?.content; if(Array.isArray(c)){return c.filter(b=>b?.type==='text').map(b=>b.text).join('\n');} return '';
           }).filter(Boolean).join('\n\n');
@@ -123,6 +140,7 @@ jobs:
           path: |
             .note-artifacts/research.md
             .note-artifacts/research_trace.json
+            .note-artifacts/research_error.log
 
   write:
     name: Write (Claude Sonnet 4.0)
@@ -151,16 +169,11 @@ jobs:
         run: |
           npm init -y
           npm i ai @ai-sdk/anthropic
-          
+
       - name: Install browser for Web tools
         run: |
           npm i playwright
           npx playwright install --with-deps chromium | cat
-       
-       - name: Install browser for Web tools
-       run: |
-       npm i playwright
-       npx playwright install --with-deps chromium | cat
 
       - name: Restore research
         env:
@@ -183,7 +196,6 @@ jobs:
           async function repairJson(raw){const sys='入力から {"title":string,"draftBody":string,"tags":string[]} のJSONのみ返答。';const {text}=await generateText({model:anthropic(modelName),system:sys,prompt:String(raw),temperature:0,maxTokens:8000});return extractJsonFlexible(text||'');}
           function sanitizeTitle(t){
             let s=String(t||'').trim();
-            // フェンスや見出し、引用符を除去
             s=s.replace(/^```[a-zA-Z0-9_-]*\s*$/,'').replace(/^```$/,'');
             s=s.replace(/^#+\s*/,'');
             s=s.replace(/^"+|"+$/g,'').replace(/^'+|'+$/g,'');
@@ -273,12 +285,9 @@ jobs:
 
           function extractJsonFlexible(raw){
             const t=(raw||'').trim().replace(/\u200B/g,'');
-            // try object
             try{ const o=JSON.parse(t); return o; }catch{}
             const fence=t.match(/```[a-zA-Z]*\s*([\s\S]*?)\s*```/); if(fence&&fence[1]){ try{ return JSON.parse(fence[1].trim()); }catch{} }
-            // try object slice
             let f=t.indexOf('{'), l=t.lastIndexOf('}'); if(f!==-1&&l!==-1&&l>f){ const cand=t.slice(f,l+1); try{ return JSON.parse(cand); }catch{} }
-            // try array slice
             f=t.indexOf('['); l=t.lastIndexOf(']'); if(f!==-1&&l!==-1&&l>f){ const cand=t.slice(f,l+1); try{ return JSON.parse(cand); }catch{} }
             return null;
           }
@@ -460,7 +469,6 @@ jobs:
             s=s.replace(/^"+|"+$/g,'').replace(/^'+|'+$/g,'');
             s=s.replace(/^`+|`+$/g,'');
             s=s.replace(/^json$/i,'').trim();
-            // タイトルが波括弧や記号のみの時は無効として扱う
             if (/^[\{\}\[\]\(\)\s]*$/.test(s)) s='';
             if(!s) s='タイトル（自動生成）';
             return s;
@@ -476,13 +484,11 @@ jobs:
             return '';
           }
           function normalizeBullets(md){
-            // 先頭の中黒・ビュレットを箇条書きに正規化
             return String(md||'')
               .replace(/^\s*[•・]\s?/gm,'- ')
               .replace(/^\s*◦\s?/gm,'  - ');
           }
           function unwrapParagraphs(md){
-            // 段落中の不必要な改行をスペースへ（見出し/リスト/引用/コードは除外）
             const lines=String(md||'').split(/\r?\n/);
             const out=[]; let buf=''; let inFence=false;
             for(const raw of lines){
@@ -490,14 +496,11 @@ jobs:
               if(/^```/.test(line)){ inFence=!inFence; buf+=line+'\n'; continue; }
               if(inFence){ buf+=line+'\n'; continue; }
               if(/^\s*$/.test(line)){ if(buf) out.push(buf.trim()); out.push(''); buf=''; continue; }
-              // 箇条書きや番号付きの字下げ改行を一行に連結
               if(/^(#{1,6}\s|[-*+]\s|\d+\.\s|>\s)/.test(line)){
                 if(buf){ out.push(buf.trim()); buf=''; }
-                // 次の数行が連続して単語単位の改行の場合は連結
                 out.push(line.replace(/\s+$/,''));
                 continue;
               }
-              // 行頭が1文字や数文字で改行されているケース（縦伸び）を連結
               if(buf){ buf += (/[。.!?)]$/.test(buf) ? '\n' : ' ') + line.trim(); }
               else { buf = line.trim(); }
             }
@@ -514,63 +517,24 @@ jobs:
               }catch{return `${text} ${url}`;}
             });
           }
-          function isGarbageLine(line){
-            return /^[\s\{\}\[\]\(\)`]+$/.test(line || '');
-          }
+          function isGarbageLine(line){ return /^[\s\{\}\[\]\(\)`]+$/.test(line || ''); }
           function normalizeListItemSoftBreaks(md){
             const lines=String(md||'').split(/\r?\n/);
             const out=[]; let inItem=false;
             const listStartRe=/^(\s*)(?:[-*+]\s|\d+\.\s)/;
             for (let i=0;i<lines.length;i++){
               const line=lines[i];
-              if (listStartRe.test(line)){
-                inItem=true;
-                out.push(line.replace(/\s+$/,''));
-                continue;
-              }
+              if (listStartRe.test(line)){ inItem=true; out.push(line.replace(/\s+$/,'')); continue; }
               if (inItem){
-                // 空行 or 次のリスト開始でアイテム終端
                 if (!line.trim()) { out.push(line); inItem=false; continue; }
                 if (listStartRe.test(line)) { inItem=false; out.push(line); continue; }
-                // 継続行は1行へ連結
-                const last = out.pop() || '';
-                out.push(last + ' ' + line.trim());
-                continue;
+                const last = out.pop() || ''; out.push(last + ' ' + line.trim()); continue;
               }
               out.push(line);
             }
             return out.join('\n');
           }
-          function splitMarkdownBlocks(md){
-            const lines=String(md||'').split(/\r?\n/);
-            const blocks=[]; let cur=[]; let inFence=false; let fenceTag='';
-            for(const line of lines){
-              const m=line.match(/^```(.*)$/);
-              if(m){
-                if(!inFence){ inFence=true; fenceTag=m[1]||''; cur.push(line); }
-                else { inFence=false; fenceTag=''; cur.push(line); blocks.push(cur.join('\n')); cur=[]; continue; }
-              } else if(!inFence && line.trim()===''){ if(cur.length){ blocks.push(cur.join('\n')); cur=[]; continue; } }
-              else if(!inFence && isGarbageLine(line)) { continue; }
-              cur.push(line);
-            }
-            if(cur.length) blocks.push(cur.join('\n'));
-            return blocks.filter(b=>{ const t=b.trim(); return t.length>0 && !isGarbageLine(t); });
-          }
-          function mdToHtml(block){
-            // JSONが紛れ込んでしまった場合は本文候補のみ抽出
-            try{
-              const maybe = JSON.parse(block);
-              if (maybe && typeof maybe==='object' && !Array.isArray(maybe)){
-                const candidates=[maybe.body, maybe.draftBody, maybe.content, maybe.text];
-                const chosen=candidates.find(v=>typeof v==='string' && v.trim());
-                if (chosen) block = String(chosen);
-              }
-            }catch{}
-            const isList = /^\s*(?:[-*+]\s|\d+\.\s)/.test(block);
-            return String(marked.parse(block, { gfm:true, breaks: !isList, mangle:false, headerIds:false }) || '');
-          }
           function htmlFromMarkdown(md){
-            // 全文を一括でHTML化（段落ベース）。リスト中の意図しない <br> を避けるため breaks=false
             return String(marked.parse(md, { gfm:true, breaks:false, mangle:false, headerIds:false }) || '');
           }
           async function insertHTML(page, locator, html){
@@ -588,7 +552,7 @@ jobs:
           }
 
           let TITLE=sanitizeTitle(rawTitle);
-          let preBody = preferBareUrls(rawBody);
+          let preBody = preferBareUrls(String(rawBody||''));
           preBody = normalizeBullets(preBody);
           preBody = normalizeListItemSoftBreaks(preBody);
           preBody = unwrapParagraphs(preBody);
@@ -596,7 +560,6 @@ jobs:
             const d=deriveTitleFromMarkdown(preBody);
             if(d) TITLE=d;
           }
-          const blocks = splitMarkdownBlocks(preBody);
 
           let browser, context, page;
           try{
@@ -612,6 +575,7 @@ jobs:
             const bodyBox = page.locator('div[contenteditable="true"][role="textbox"]').first();
             await bodyBox.waitFor({ state: 'visible' });
             const htmlAll = htmlFromMarkdown(preBody);
+
             let pasted = false;
             try {
               const origin = new URL(START_URL).origin;
@@ -627,11 +591,9 @@ jobs:
               await page.keyboard.press('Control+V');
               await page.waitForTimeout(200);
               pasted = true;
-            } catch (e) {
-              // クリップボード権限が無い場合のフォールバック
-            }
+            } catch {}
+
             if (!pasted) {
-              // 一括HTML挿入フォールバック
               await insertHTML(page, bodyBox, htmlAll);
               await page.waitForTimeout(100);
             }
@@ -699,4 +661,3 @@ jobs:
         with:
           name: note-screenshot
           path: ${{ steps.publish.outputs.screenshot }}
-
