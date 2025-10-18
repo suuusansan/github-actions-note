@@ -66,9 +66,11 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Claude Code SDK
+      - name: Install Claude Agent SDK (clean)
         run: |
+          rm -rf node_modules package-lock.json
           npm init -y
+          npm uninstall @anthropic-ai/claude-code || true
           npm i @anthropic-ai/claude-agent-sdk
 
       - name: Research with Claude Agent SDK
@@ -76,6 +78,7 @@ jobs:
           cat > research.mjs <<'EOF'
           import { query } from '@anthropic-ai/claude-agent-sdk';
           import fs from 'fs';
+          process.env.CLAUDE_AGENT_LOG_LEVEL = process.env.CLAUDE_AGENT_LOG_LEVEL || 'debug';
           const theme = process.env.THEME || '';
           const target = process.env.TARGET || '';
           const today = new Date().toISOString().slice(0,10);
@@ -153,6 +156,11 @@ jobs:
         run: |
           npm i playwright
           npx playwright install --with-deps chromium | cat
+       
+       - name: Install browser for Web tools
+       run: |
+       npm i playwright
+       npx playwright install --with-deps chromium | cat
 
       - name: Restore research
         env:
@@ -227,6 +235,7 @@ jobs:
       CLAUDE_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TITLE: ${{ needs.write.outputs.title }}
+      CLAUDE_AGENT_LOG_LEVEL: debug
     outputs:
       title: ${{ steps.collect.outputs.title }}
       final_b64: ${{ steps.collect.outputs.final_b64 }}
