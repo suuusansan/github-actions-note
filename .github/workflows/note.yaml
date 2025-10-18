@@ -148,6 +148,11 @@ jobs:
         run: |
           npm init -y
           npm i ai @ai-sdk/anthropic
+          
+      - name: Install browser for Web tools
+        run: |
+          npm i playwright
+          npx playwright install --with-deps chromium | cat
 
       - name: Restore research
         env:
@@ -219,6 +224,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TITLE: ${{ needs.write.outputs.title }}
     outputs:
