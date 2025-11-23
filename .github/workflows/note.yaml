@@ -560,10 +560,25 @@ jobs:
 
               // 3. 本文入力
               console.log('本文入力中...');
-              // noteのエディタは特殊なので、クリックしてから入力
-              await page.locator('.editor-input-area').click();
-              await page.keyboard.type(draftBody, { delay: 1 }); // 少しゆっくり入力して確実性を高める
-              // または長文の場合はクリップボード経由の方が安定する場合もありますが、まずはtypeで。
+              
+              // 【修正】クラス名 ".editor-input-area" は古い可能性があるため変更
+              // Noteのエディタは "ProseMirror" というライブラリを使っているため、このクラスを狙います
+              const editor = page.locator('div.ProseMirror').first();
+              
+              // エディタが見つかるまで待機
+              try {
+                await editor.waitFor({ state: 'visible', timeout: 10000 });
+                await editor.click();
+              } catch (e) {
+                console.log('ProseMirrorが見つかりません。別の方法("本文を入力"の文字)で探します...');
+                // 代替策: プレースホルダーの文字をクリック
+                await page.getByText('本文を入力').click();
+              }
+
+              // 入力
+              await page.keyboard.type(draftBody, { delay: 1 }); 
+              
+              await page.waitForTimeout(1000);
               
               await page.waitForTimeout(1000);
 
