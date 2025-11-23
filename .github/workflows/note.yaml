@@ -424,7 +424,7 @@ jobs:
           echo "$b64" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-　post:
+  post:
     name: Post to note.com (Playwright)
     needs: factcheck
     if: ${{ github.event.inputs.dry_run != 'true' }}
