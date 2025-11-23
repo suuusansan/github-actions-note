@@ -497,28 +497,56 @@ jobs:
           IS_PUBLIC: ${{ github.event.inputs.is_public }}
         run: |
           cat > post.mjs <<'EOF'
-          const { chromium } = require('playwright');
-          
-          // 【最重要】ここで文字列 'true' かどうかを厳密に判定する
-          const isPublic = process.env.IS_PUBLIC === 'true'; 
+          // ▼▼▼ 修正: require ではなく import を使用 ▼▼▼
+          import { chromium } from 'playwright'; 
+          import fs from 'fs'; // 必要な場合
+
+          // ▼▼▼ 修正: 文字列判定ロジック ▼▼▼
+          const isPublic = process.env.IS_PUBLIC === 'true';
 
           (async () => {
-            // ... (ここにブラウザ起動やログイン処理があるはず) ...
+            console.log(`起動モード: ${isPublic ? '公開(Public)' : '下書き(Draft)'}`);
 
-            // 最後の投稿ボタンを押す分岐
-            if (isPublic) {
-              console.log("🔥 公開設定で投稿します");
-              // 公開ボタンを押す処理
-              await page.getByRole('button', { name: '公開設定' }).click();
-              // ...
-            } else {
-              console.log("💾 下書きとして保存します");
-              // 下書き保存ボタンを押す処理
-              // (noteのUIに合わせて調整してください)
-              await page.getByRole('button', { name: '下書き保存' }).click();
-            }
+            const browser = await chromium.launch({ headless: true });
+            // 画面サイズを確保（ボタン隠れ防止）
+            const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+            const page = await context.newPage();
+
+            // === ここにログインや記事作成の処理を記述 ===
+            // 既存のログイン処理や、タイトル・本文入力のコードをここに貼ってください
+            // 例: await page.goto(process.env.START_URL); 
             
-            // ...
+            // ... (中略: 本文入力など) ...
+
+
+            // === 最後の投稿ボタンの分岐 ===
+            if (isPublic) {
+              console.log("🔥 公開ボタンを押します");
+              await page.getByRole('button', { name: '公開設定' }).click();
+              // ※さらにその後の「投稿」確定ボタン等の処理が必要なら追加
+            } else {
+              console.log("💾 下書き保存ボタンを押します");
+              
+              // 「下書き保存」ボタンを探す
+              const draftBtn = page.getByRole('button', { name: '下書き保存' });
+              
+              if (await draftBtn.isVisible()) {
+                await draftBtn.click();
+              } else {
+                // ボタンが見つからない場合、メニュー内にある可能性を考慮
+                console.log("メニューから下書き保存を探します");
+                const menuBtn = page.locator('.editor-header-action-menu');
+                if (await menuBtn.isVisible()) {
+                  await menuBtn.click();
+                  await page.getByText('下書き保存').click();
+                }
+              }
+              
+              // 保存完了のトースト等を待機（念の為）
+              await page.waitForTimeout(3000);
+            }
+
+            await browser.close();
           })();
           EOF
           
