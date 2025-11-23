@@ -477,17 +477,53 @@ jobs:
           echo "$FINAL_B64" | base64 -d > final.json || echo "$FINAL_B64" | base64 --decode > final.json
           echo "TITLE=$(jq -r .title final.json)" >> $GITHUB_OUTPUT
           echo "TAGS=$(jq -r '.tags | join(", ")' final.json)" >> $GITHUB_OUTPUT
-
+        #      - name: Publish via Playwright (draft or public)
+        #        id: publish
+        #        env:
+        #          TITLE: ${{ steps.draft.outputs.TITLE }}
+        #          TAGS: ${{ steps.draft.outputs.TAGS }}
+        #          STATE_PATH: ${{ steps.state.outputs.STATE_PATH }}
+        #          run: |
+        #          # ここは元の投稿ロジックそのままでOK（長いので割愛）
+        #            node -e "console.log('Ready to post. Plug in your existing post.mjs if needed.')" || true
+        #
+        
       - name: Publish via Playwright (draft or public)
         id: publish
         env:
           TITLE: ${{ steps.draft.outputs.TITLE }}
           TAGS: ${{ steps.draft.outputs.TAGS }}
           STATE_PATH: ${{ steps.state.outputs.STATE_PATH }}
+          IS_PUBLIC: ${{ github.event.inputs.is_public }}
         run: |
-          # ここは元の投稿ロジックそのままでOK（長いので割愛）
-          node -e "console.log('Ready to post. Plug in your existing post.mjs if needed.')" || true
+          cat > post.mjs <<'EOF'
+          const { chromium } = require('playwright');
+          
+          // 【最重要】ここで文字列 'true' かどうかを厳密に判定する
+          const isPublic = process.env.IS_PUBLIC === 'true'; 
 
+          (async () => {
+            // ... (ここにブラウザ起動やログイン処理があるはず) ...
+
+            // 最後の投稿ボタンを押す分岐
+            if (isPublic) {
+              console.log("🔥 公開設定で投稿します");
+              // 公開ボタンを押す処理
+              await page.getByRole('button', { name: '公開設定' }).click();
+              // ...
+            } else {
+              console.log("💾 下書きとして保存します");
+              // 下書き保存ボタンを押す処理
+              // (noteのUIに合わせて調整してください)
+              await page.getByRole('button', { name: '下書き保存' }).click();
+            }
+            
+            // ...
+          })();
+          EOF
+          
+          node post.mjs
+          
       - name: Upload screenshot (if any)
         if: ${{ steps.publish.outputs.screenshot != '' }}
         uses: actions/upload-artifact@v4
