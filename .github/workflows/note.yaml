@@ -424,10 +424,7 @@ jobs:
           echo "$b64" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-# =========================
-# Post: 既存の Playwright で投稿
-# =========================
-  post:
+post:
     name: Post to note.com (Playwright)
     needs: factcheck
     if: ${{ github.event.inputs.dry_run != 'true' }}
@@ -441,18 +438,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
       - name: Install Playwright
         run: |
           npm init -y
-          npm i playwright marked
-          npx playwright install --with-deps chromium | cat
-
+          npm i playwright
+          npx playwright install --with-deps chromium
       - name: Prepare storageState
         id: state
         run: |
@@ -460,14 +454,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP"
           echo "$STATE_JSON" > "$RUNNER_TEMP/note-state.json"
           echo "STATE_PATH=$RUNNER_TEMP/note-state.json" >> $GITHUB_OUTPUT
-
-      - name: Ensure jq (post)
+      - name: Ensure jq
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y jq
           fi
-
       - name: Restore final
         id: draft
         env:
@@ -477,17 +469,7 @@ jobs:
           echo "$FINAL_B64" | base64 -d > final.json || echo "$FINAL_B64" | base64 --decode > final.json
           echo "TITLE=$(jq -r .title final.json)" >> $GITHUB_OUTPUT
           echo "TAGS=$(jq -r '.tags | join(", ")' final.json)" >> $GITHUB_OUTPUT
-        #      - name: Publish via Playwright (draft or public)
-        #        id: publish
-        #        env:
-        #          TITLE: ${{ steps.draft.outputs.TITLE }}
-        #          TAGS: ${{ steps.draft.outputs.TAGS }}
-        #          STATE_PATH: ${{ steps.state.outputs.STATE_PATH }}
-        #          run: |
-        #          # ここは元の投稿ロジックそのままでOK（長いので割愛）
-        #            node -e "console.log('Ready to post. Plug in your existing post.mjs if needed.')" || true
-        #
-        
+      
       - name: Publish via Playwright (draft or public)
         id: publish
         env:
@@ -495,23 +477,20 @@ jobs:
           TAGS: ${{ steps.draft.outputs.TAGS }}
           STATE_PATH: ${{ steps.state.outputs.STATE_PATH }}
           IS_PUBLIC: ${{ github.event.inputs.is_public }}
-          # 本文をJSONファイルから読み込むためパスを指定
-          FINAL_JSON_PATH: final.json 
+          FINAL_JSON_PATH: final.json
         run: |
           cat > post.mjs <<'EOF'
           import { chromium } from 'playwright';
           import fs from 'fs';
 
-          // --- 設定読み込み ---
           const isPublic = process.env.IS_PUBLIC === 'true';
           const statePath = process.env.STATE_PATH;
-          const finalJsonPath = 'final.json'; // 前のステップで生成されたファイル
-          
-          // 本文をファイルから安全に読み込む（環境変数だと改行が壊れることがあるため）
+          const finalJsonPath = 'final.json';
+
           let draftBody = '';
           let title = process.env.TITLE || '';
           let tagsStr = process.env.TAGS || '';
-          
+
           try {
             if (fs.existsSync(finalJsonPath)) {
               const data = JSON.parse(fs.readFileSync(finalJsonPath, 'utf8'));
@@ -519,143 +498,106 @@ jobs:
               if (!title) title = data.title || '';
               if (!tagsStr && data.tags) tagsStr = data.tags.join(', ');
             }
-          } catch (e) {
-            console.error('JSON読み込みエラー:', e);
-          }
+          } catch (e) { console.error('JSON Load Error:', e); }
 
           if (!draftBody) {
-             console.error('【致命的エラー】本文が空です。投稿を中止します。');
+             console.error('Fatal: Body is empty.');
              process.exit(1);
           }
 
           (async () => {
-            console.log(`🚀 起動: ${isPublic ? '公開モード' : '下書きモード'}`);
-            console.log(`タイトル: ${title}`);
-
-            // ブラウザ起動（storageStateでログイン維持）
+            console.log(`Target Mode: ${isPublic ? 'PUBLIC' : 'DRAFT'}`);
             const browser = await chromium.launch({ headless: true });
             const context = await browser.newContext({
               storageState: statePath,
               viewport: { width: 1280, height: 800 },
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
             });
-            
             const page = await context.newPage();
 
             try {
               // 1. エディタを開く
-              console.log('エディタにアクセス中...');
               await page.goto('https://editor.note.com/new', { waitUntil: 'domcontentloaded' });
-              
-              // ログイン確認（ログイン画面に飛ばされていたらエラー）
-              if (page.url().includes('/login')) {
-                throw new Error('ログインできていません。STATE_JSONの期限切れか、設定ミスです。');
-              }
 
               // 2. タイトル入力
-              console.log('タイトル入力中...');
+              console.log('Input Title...');
               const titleInput = page.getByPlaceholder('記事タイトル');
               await titleInput.click();
               await titleInput.fill(title);
 
-              // 3. 本文入力
-              console.log('本文入力中...');
+              // 3. 本文入力（ここが修正箇所です）
+              console.log('Input Body...');
               
-              // 【修正】クラス名 ".editor-input-area" は古い可能性があるため変更
-              // Noteのエディタは "ProseMirror" というライブラリを使っているため、このクラスを狙います
+              // ★★★ 修正箇所: .editor-input-area ではなく div.ProseMirror を使う ★★★
               const editor = page.locator('div.ProseMirror').first();
               
-              // エディタが見つかるまで待機
               try {
+                // エディタが表示されるのを待つ
                 await editor.waitFor({ state: 'visible', timeout: 10000 });
                 await editor.click();
               } catch (e) {
-                console.log('ProseMirrorが見つかりません。別の方法("本文を入力"の文字)で探します...');
-                // 代替策: プレースホルダーの文字をクリック
+                console.log('Warning: ProseMirror selector failed. Trying fallback...');
+                // 万が一クラス名が変わっていた場合の予備: プレースホルダー文字をクリック
                 await page.getByText('本文を入力').click();
               }
 
-              // 入力
-              await page.keyboard.type(draftBody, { delay: 1 }); 
-              
-              await page.waitForTimeout(1000);
-              
+              // 文字入力
+              await page.keyboard.type(draftBody, { delay: 1 });
               await page.waitForTimeout(1000);
 
-              // 4. ハッシュタグ入力（もしあれば）
-              if (tagsStr) {
-                console.log('タグ設定中...');
-                // 公開設定画面でやるのが確実ですが、ここでは簡易的に「公開設定」ボタンを押した後の画面で処理する前提
-                // ※フローが複雑になるため、今回は「公開設定」画面での入力は省略し、本文末尾に追加する等の運用でカバー推奨ですが
-                // noteのUIでは「公開設定」ボタンを押した後のモーダルでタグを入れるのが一般的です。
-              }
-
-              // 5. 保存/公開処理
+              // 4. 保存処理
               if (isPublic) {
-                console.log('🔥 公開処理を開始...');
+                console.log('Action: Publish');
                 await page.getByRole('button', { name: '公開設定' }).click();
                 
-                // ハッシュタグ入力（公開設定モーダル内）
+                // タグ入力(公開設定内)
                 if (tagsStr) {
-                   await page.waitForSelector('input[placeholder="ハッシュタグを追加"]', { timeout: 5000 }).catch(()=>console.log('タグ入力欄見つからず'));
+                   // 少し待つ
+                   await page.waitForTimeout(1000);
                    const tagInput = page.getByPlaceholder('ハッシュタグを追加');
                    if (await tagInput.isVisible()) {
                       const tags = tagsStr.split(',').map(t => t.trim());
                       for (const tag of tags) {
                         await tagInput.fill(tag);
                         await page.keyboard.press('Enter');
-                        await page.waitForTimeout(500);
+                        await page.waitForTimeout(300);
                       }
                    }
                 }
-
-                // 最終的な「投稿」ボタン（UIによって文言が違う場合があるので注意）
-                const publishBtn = page.getByRole('button', { name: '投稿', exact: true }); 
-                // または "公開"
+                
+                const publishBtn = page.getByRole('button', { name: '投稿', exact: true });
                 if (await publishBtn.isVisible()) {
                   await publishBtn.click();
-                  console.log('✅ 投稿ボタンをクリックしました');
                 } else {
                    await page.getByText('投稿する').click();
                 }
-                
               } else {
-                console.log('💾 下書き保存処理を開始...');
-                // 下書き保存ボタン
+                console.log('Action: Draft Save');
                 const draftBtn = page.getByRole('button', { name: '下書き保存' });
                 if (await draftBtn.isVisible()) {
                   await draftBtn.click();
                 } else {
-                  // メニューの中にある場合
+                  // 画面幅によってはメニューの中にある
                   await page.locator('.editor-header-action-menu').click();
-                  await page.waitForTimeout(500);
                   await page.getByText('下書き保存').click();
                 }
-                
-                // 「下書きを保存しました」を確認
                 await page.waitForSelector('text=下書きを保存しました', { timeout: 10000 });
-                console.log('✅ 下書き保存完了を確認しました');
               }
-
-              // 念のためスクリーンショット
-              await page.screenshot({ path: 'result.png' });
-              console.log('スクリーンショットを保存しました: result.png');
-
+              console.log('SUCCESS');
             } catch (e) {
-              console.error('❌ エラー発生:', e);
+              console.error('ERROR:', e);
               await page.screenshot({ path: 'error.png' });
               process.exit(1);
             }
-
             await browser.close();
           })();
           EOF
           
           node post.mjs
-          
-      - name: Upload screenshot (if any)
-        if: ${{ steps.publish.outputs.screenshot != '' }}
+
+      - name: Upload screenshot (on failure)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: note-screenshot
-          path: ${{ steps.publish.outputs.screenshot }}
+          name: error-screenshot
+          path: error.png
