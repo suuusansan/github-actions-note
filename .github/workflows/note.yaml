@@ -495,55 +495,141 @@ jobs:
           TAGS: ${{ steps.draft.outputs.TAGS }}
           STATE_PATH: ${{ steps.state.outputs.STATE_PATH }}
           IS_PUBLIC: ${{ github.event.inputs.is_public }}
+          # 本文をJSONファイルから読み込むためパスを指定
+          FINAL_JSON_PATH: final.json 
         run: |
           cat > post.mjs <<'EOF'
-          // ▼▼▼ 修正: require ではなく import を使用 ▼▼▼
-          import { chromium } from 'playwright'; 
-          import fs from 'fs'; // 必要な場合
+          import { chromium } from 'playwright';
+          import fs from 'fs';
 
-          // ▼▼▼ 修正: 文字列判定ロジック ▼▼▼
+          // --- 設定読み込み ---
           const isPublic = process.env.IS_PUBLIC === 'true';
+          const statePath = process.env.STATE_PATH;
+          const finalJsonPath = 'final.json'; // 前のステップで生成されたファイル
+          
+          // 本文をファイルから安全に読み込む（環境変数だと改行が壊れることがあるため）
+          let draftBody = '';
+          let title = process.env.TITLE || '';
+          let tagsStr = process.env.TAGS || '';
+          
+          try {
+            if (fs.existsSync(finalJsonPath)) {
+              const data = JSON.parse(fs.readFileSync(finalJsonPath, 'utf8'));
+              draftBody = data.body || '';
+              if (!title) title = data.title || '';
+              if (!tagsStr && data.tags) tagsStr = data.tags.join(', ');
+            }
+          } catch (e) {
+            console.error('JSON読み込みエラー:', e);
+          }
+
+          if (!draftBody) {
+             console.error('【致命的エラー】本文が空です。投稿を中止します。');
+             process.exit(1);
+          }
 
           (async () => {
-            console.log(`起動モード: ${isPublic ? '公開(Public)' : '下書き(Draft)'}`);
+            console.log(`🚀 起動: ${isPublic ? '公開モード' : '下書きモード'}`);
+            console.log(`タイトル: ${title}`);
 
+            // ブラウザ起動（storageStateでログイン維持）
             const browser = await chromium.launch({ headless: true });
-            // 画面サイズを確保（ボタン隠れ防止）
-            const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+            const context = await browser.newContext({
+              storageState: statePath,
+              viewport: { width: 1280, height: 800 },
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            });
+            
             const page = await context.newPage();
 
-            // === ここにログインや記事作成の処理を記述 ===
-            // 既存のログイン処理や、タイトル・本文入力のコードをここに貼ってください
-            // 例: await page.goto(process.env.START_URL); 
-            
-            // ... (中略: 本文入力など) ...
-
-
-            // === 最後の投稿ボタンの分岐 ===
-            if (isPublic) {
-              console.log("🔥 公開ボタンを押します");
-              await page.getByRole('button', { name: '公開設定' }).click();
-              // ※さらにその後の「投稿」確定ボタン等の処理が必要なら追加
-            } else {
-              console.log("💾 下書き保存ボタンを押します");
+            try {
+              // 1. エディタを開く
+              console.log('エディタにアクセス中...');
+              await page.goto('https://editor.note.com/new', { waitUntil: 'domcontentloaded' });
               
-              // 「下書き保存」ボタンを探す
-              const draftBtn = page.getByRole('button', { name: '下書き保存' });
+              // ログイン確認（ログイン画面に飛ばされていたらエラー）
+              if (page.url().includes('/login')) {
+                throw new Error('ログインできていません。STATE_JSONの期限切れか、設定ミスです。');
+              }
+
+              // 2. タイトル入力
+              console.log('タイトル入力中...');
+              const titleInput = page.getByPlaceholder('記事タイトル');
+              await titleInput.click();
+              await titleInput.fill(title);
+
+              // 3. 本文入力
+              console.log('本文入力中...');
+              // noteのエディタは特殊なので、クリックしてから入力
+              await page.locator('.editor-input-area').click();
+              await page.keyboard.type(draftBody, { delay: 1 }); // 少しゆっくり入力して確実性を高める
+              // または長文の場合はクリップボード経由の方が安定する場合もありますが、まずはtypeで。
               
-              if (await draftBtn.isVisible()) {
-                await draftBtn.click();
+              await page.waitForTimeout(1000);
+
+              // 4. ハッシュタグ入力（もしあれば）
+              if (tagsStr) {
+                console.log('タグ設定中...');
+                // 公開設定画面でやるのが確実ですが、ここでは簡易的に「公開設定」ボタンを押した後の画面で処理する前提
+                // ※フローが複雑になるため、今回は「公開設定」画面での入力は省略し、本文末尾に追加する等の運用でカバー推奨ですが
+                // noteのUIでは「公開設定」ボタンを押した後のモーダルでタグを入れるのが一般的です。
+              }
+
+              // 5. 保存/公開処理
+              if (isPublic) {
+                console.log('🔥 公開処理を開始...');
+                await page.getByRole('button', { name: '公開設定' }).click();
+                
+                // ハッシュタグ入力（公開設定モーダル内）
+                if (tagsStr) {
+                   await page.waitForSelector('input[placeholder="ハッシュタグを追加"]', { timeout: 5000 }).catch(()=>console.log('タグ入力欄見つからず'));
+                   const tagInput = page.getByPlaceholder('ハッシュタグを追加');
+                   if (await tagInput.isVisible()) {
+                      const tags = tagsStr.split(',').map(t => t.trim());
+                      for (const tag of tags) {
+                        await tagInput.fill(tag);
+                        await page.keyboard.press('Enter');
+                        await page.waitForTimeout(500);
+                      }
+                   }
+                }
+
+                // 最終的な「投稿」ボタン（UIによって文言が違う場合があるので注意）
+                const publishBtn = page.getByRole('button', { name: '投稿', exact: true }); 
+                // または "公開"
+                if (await publishBtn.isVisible()) {
+                  await publishBtn.click();
+                  console.log('✅ 投稿ボタンをクリックしました');
+                } else {
+                   await page.getByText('投稿する').click();
+                }
+                
               } else {
-                // ボタンが見つからない場合、メニュー内にある可能性を考慮
-                console.log("メニューから下書き保存を探します");
-                const menuBtn = page.locator('.editor-header-action-menu');
-                if (await menuBtn.isVisible()) {
-                  await menuBtn.click();
+                console.log('💾 下書き保存処理を開始...');
+                // 下書き保存ボタン
+                const draftBtn = page.getByRole('button', { name: '下書き保存' });
+                if (await draftBtn.isVisible()) {
+                  await draftBtn.click();
+                } else {
+                  // メニューの中にある場合
+                  await page.locator('.editor-header-action-menu').click();
+                  await page.waitForTimeout(500);
                   await page.getByText('下書き保存').click();
                 }
+                
+                // 「下書きを保存しました」を確認
+                await page.waitForSelector('text=下書きを保存しました', { timeout: 10000 });
+                console.log('✅ 下書き保存完了を確認しました');
               }
-              
-              // 保存完了のトースト等を待機（念の為）
-              await page.waitForTimeout(3000);
+
+              // 念のためスクリーンショット
+              await page.screenshot({ path: 'result.png' });
+              console.log('スクリーンショットを保存しました: result.png');
+
+            } catch (e) {
+              console.error('❌ エラー発生:', e);
+              await page.screenshot({ path: 'error.png' });
+              process.exit(1);
             }
 
             await browser.close();
